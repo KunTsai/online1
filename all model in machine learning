@@ -1,0 +1,260 @@
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, LabelBinarizer
+
+# 讀取資料
+file = 'Golden State Warriors.csv'
+df = pd.read_csv(file)
+
+# 先印出原始資料的欄位名稱與資料筆數
+print('原始資料欄位:')
+print(list(df.columns))
+print(f'原始資料筆數: {len(df)}')
+
+# 1. Result(作為預測目標變數)、Home欄位 one hot encoding
+# 先處理Result欄位，轉成0/1 (W=1, L=0)
+df['Result'] = df['Result'].map({'W': 1, 'L': 0})
+
+# Home 欄位 one hot encoding
+home_ohe = pd.get_dummies(df['Home'], prefix='Home').astype(int)
+df = pd.concat([df, home_ohe], axis=1)
+
+# 2. 投籃、三分、罰球、籃板資料組合
+# 只取前五位先發球員(Starters_1~Starters_5)的數據
+players = ['_1', '_2', '_3', '_4', '_5', '_6', '_7']  # 包含替補球員
+
+# 投籃資料: FG, FGA, FG%
+FG = df[[f'FG{p}' for p in players]].values
+FGA = df[[f'FGA{p}' for p in players]].values
+FGP = df[[f'FG%{p}' for p in players]].values
+FG_sum = FG.sum(axis=1)
+FGA_sum = FGA.sum(axis=1)
+FGP_mean = np.nanmean(FGP, axis=1)
+
+# 三分球資料: 3P, 3PA, 3P%
+TP = df[[f'3P{p}' for p in players]].values
+TPA = df[[f'3PA{p}' for p in players]].values
+TPP = df[[f'3P%{p}' for p in players]].values
+TP_sum = TP.sum(axis=1)
+TPA_sum = TPA.sum(axis=1)
+TPP_mean = np.nanmean(TPP, axis=1)
+
+# 罰球資料: FT, FTA, FT%
+FT = df[[f'FT{p}' for p in players]].values
+FTA = df[[f'FTA{p}' for p in players]].values
+FTP = df[[f'FT%{p}' for p in players]].values
+FT_sum = FT.sum(axis=1)
+FTA_sum = FTA.sum(axis=1)
+FTP_mean = np.nanmean(FTP, axis=1)
+
+# 籃板資料: ORB, DRB, TRB
+ORB = df[[f'ORB{p}' for p in players]].values
+DRB = df[[f'DRB{p}' for p in players]].values
+TRB = df[[f'TRB{p}' for p in players]].values
+ORB_sum = ORB.sum(axis=1)
+DRB_sum = DRB.sum(axis=1)
+TRB_sum = TRB.sum(axis=1)
+
+# 3. AST、STL、BLK、TOV、PF、PTS、+/-_1 (前五位先發平均)
+AST = df[[f'AST{p}' for p in players]].values.mean(axis=1)
+STL = df[[f'STL{p}' for p in players]].values.mean(axis=1)
+BLK = df[[f'BLK{p}' for p in players]].values.mean(axis=1)
+TOV = df[[f'TOV{p}' for p in players]].values.mean(axis=1)
+PF = df[[f'PF{p}' for p in players]].values.mean(axis=1)
+PTS = df[[f'PTS{p}' for p in players]].values.mean(axis=1)
+# 修正欄位名稱，使用正確的格式
+PLUSMINUS = df[[f'(+/-{p})' for p in players]].values.mean(axis=1)
+
+# 4. Tm, Opp 標準化
+scaler = StandardScaler()
+Tm_scaled = scaler.fit_transform(df[['Tm']])
+Opp_scaled = scaler.fit_transform(df[['Opp']])
+
+# 將所有特徵組合成一個DataFrame
+features = pd.DataFrame({
+    'FG_sum': FG_sum,
+    'FGA_sum': FGA_sum,
+    'FGP_mean': FGP_mean,
+    'TP_sum': TP_sum,
+    'TPA_sum': TPA_sum,
+    'TPP_mean': TPP_mean,
+    'FT_sum': FT_sum,
+    'FTA_sum': FTA_sum,
+    'FTP_mean': FTP_mean,
+    'ORB_sum': ORB_sum,
+    'DRB_sum': DRB_sum,
+    'TRB_sum': TRB_sum,
+    'AST_mean': AST,
+    'STL_mean': STL,
+    'BLK_mean': BLK,
+    'TOV_mean': TOV,
+    'PF_mean': PF,
+    'PTS_mean': PTS,
+    'PLUSMINUS_mean': PLUSMINUS,
+    'Tm_scaled': Tm_scaled.flatten(),
+    'Opp_scaled': Opp_scaled.flatten()
+})
+
+# 對所有數值特徵做標準化
+features = pd.DataFrame(scaler.fit_transform(features), columns=features.columns)
+
+# 合併one hot欄位
+features = pd.concat([features, home_ohe], axis=1)
+
+# 印出實際用於前處理的欄位名稱
+print('\n實際用於前處理的欄位:')
+print(list(features.columns))
+print(f'前處理後的特徵數量: {len(features.columns)}')
+
+# 印出處理後的完整資料
+print(features.head())
+print('Result(預測目標):')
+print(df['Result'].head())
+
+
+
+# ===== 隨機森林模型建立與預測 =====
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+import warnings
+warnings.filterwarnings('ignore')
+
+def create_sequence_data(features, targets, n_games):
+    """
+    建立序列資料：使用前n場比賽的資料來預測下一場比賽
+    """
+    X, y = [], []
+    for i in range(n_games, len(features)):
+        # 取前n場比賽的所有特徵
+        sequence = features.iloc[i-n_games:i].values.flatten()
+        X.append(sequence)
+        y.append(targets.iloc[i])
+    return np.array(X), np.array(y)
+
+def evaluate_random_forest(X, y, n_games):
+    """
+    評估隨機森林模型
+    """
+    # 分割訓練和測試資料
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    
+    # 定義隨機森林模型
+    rf_model = RandomForestClassifier(random_state=42, n_estimators=100)
+    
+    print(f"\n=== 使用前 {n_games} 場比賽資料進行隨機森林預測 ===")
+    print(f"訓練資料筆數: {len(X_train)}, 測試資料筆數: {len(X_test)}")
+    
+    # 訓練模型
+    rf_model.fit(X_train, y_train)
+    
+    # 預測
+    y_pred = rf_model.predict(X_test)
+    
+    # 計算準確率
+    accuracy = accuracy_score(y_test, y_pred)
+    
+    # 交叉驗證
+    cv_scores = cross_val_score(rf_model, X, y, cv=5, scoring='accuracy')
+    
+    results = {
+        'accuracy': accuracy,
+        'cv_mean': cv_scores.mean(),
+        'cv_std': cv_scores.std(),
+        'model': rf_model
+    }
+    
+    print(f"隨機森林模型:")
+    print(f"  測試準確率: {accuracy:.4f}")
+    print(f"  交叉驗證準確率: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
+    
+    # 詳細分類報告
+    print(f"  分類報告:")
+    print(classification_report(y_test, y_pred, target_names=['敗', '勝']))
+    print()
+    
+    return results
+
+# 主程式：嘗試不同的n值並評估隨機森林模型
+print("\n" + "="*60)
+print("開始隨機森林模型訓練與評估")
+print("="*60)
+
+# 準備目標變數
+targets = df['Result']
+
+# 嘗試不同的n值（前幾場比賽）
+n_values = [3, 5, 7, 10]
+best_results = {}
+overall_best = {'n': 0, 'accuracy': 0}
+
+for n in n_values:
+    print(f"\n{'='*20} 測試 n={n} {'='*20}")
+    
+    # 建立序列資料
+    X, y = create_sequence_data(features, targets, n)
+    
+    if len(X) < 20:  # 如果資料太少，跳過
+        print(f"資料筆數不足 ({len(X)} < 20)，跳過 n={n}")
+        continue
+    
+    print(f"序列資料筆數: {len(X)}")
+    print(f"特徵維度: {X.shape[1]}")
+    
+    # 評估隨機森林模型
+    results = evaluate_random_forest(X, y, n)
+    best_results[n] = results
+    
+    # 更新最佳結果
+    if results['accuracy'] > overall_best['accuracy']:
+        overall_best = {
+            'n': n,
+            'accuracy': results['accuracy']
+        }
+
+# 總結最佳結果
+print("\n" + "="*60)
+print("最終結果總結")
+print("="*60)
+print(f"最佳配置: 使用前 {overall_best['n']} 場比賽資料")
+print(f"最佳準確率: {overall_best['accuracy']:.4f}")
+
+# 詳細比較所有n值的結果
+print("\n各n值的隨機森林模型比較:")
+for n in n_values:
+    if n in best_results:
+        print(f"\nn={n}:")
+        result = best_results[n]
+        print(f"  測試準確率: {result['accuracy']:.4f}")
+        print(f"  交叉驗證準確率: {result['cv_mean']:.4f} (+/- {result['cv_std'] * 2:.4f})")
+
+# 使用最佳模型進行預測示例
+print("\n" + "="*60)
+print("預測示例")
+print("="*60)
+
+if overall_best['n'] > 0:
+    # 重新建立最佳配置的資料
+    X_best, y_best = create_sequence_data(features, targets, overall_best['n'])
+    X_train, X_test, y_train, y_test = train_test_split(X_best, y_best, test_size=0.2, random_state=42, stratify=y_best)
+    
+    # 訓練最佳模型
+    best_model = best_results[overall_best['n']]['model']
+    best_model.fit(X_train, y_train)
+    
+    # 預測最後幾場比賽
+    recent_predictions = best_model.predict(X_test[-5:])
+    recent_actual = y_test[-5:]
+    
+    print(f"使用隨機森林模型預測最近5場比賽:")
+    for i, (pred, actual) in enumerate(zip(recent_predictions, recent_actual)):
+        pred_text = "勝" if pred == 1 else "敗"
+        actual_text = "勝" if actual == 1 else "敗"
+        status = "✓" if pred == actual else "✗"
+        print(f"  比賽 {i+1}: 預測 {pred_text}, 實際 {actual_text} {status}")
+    
+    # 計算預測準確率
+    final_accuracy = accuracy_score(recent_actual, recent_predictions)
+    print(f"最近5場預測準確率: {final_accuracy:.4f}")
+
+print("\n程式執行完成！")
